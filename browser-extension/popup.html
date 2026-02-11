@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>解除复制粘贴限制</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            width: 320px;
+            padding: 16px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 16px;
+        }
+        
+        .header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        
+        .header .version {
+            font-size: 12px;
+            opacity: 0.8;
+        }
+        
+        .switch-container {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 12px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .switch-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        
+        .switch-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .switch-label {
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        .switch-description {
+            font-size: 11px;
+            opacity: 0.8;
+            margin-top: 2px;
+        }
+        
+        /* 开关样式 */
+        .toggle-switch {
+            position: relative;
+            width: 50px;
+            height: 26px;
+            background-color: rgba(255, 255, 255, 0.3);
+            border-radius: 13px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        
+        .toggle-switch.active {
+            background-color: #4ade80;
+        }
+        
+        .toggle-switch::after {
+            content: '';
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 20px;
+            height: 20px;
+            background-color: #fff;
+            border-radius: 50%;
+            transition: transform 0.3s;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        
+        .toggle-switch.active::after {
+            transform: translateX(24px);
+        }
+        
+        .info-section {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+        
+        .info-title {
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .info-content {
+            font-size: 11px;
+            line-height: 1.6;
+            opacity: 0.9;
+        }
+        
+        .shortcut {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-weight: 600;
+        }
+        
+        .footer {
+            text-align: center;
+            font-size: 11px;
+            opacity: 0.7;
+            margin-top: 8px;
+        }
+        
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #ef4444;
+            transition: background-color 0.3s;
+        }
+        
+        .status-dot.active {
+            background-color: #4ade80;
+            box-shadow: 0 0 8px #4ade80;
+        }
+
+        .site-settings-section {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 12px;
+        }
+
+        .site-settings-title {
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .site-hostname {
+            font-size: 11px;
+            opacity: 0.8;
+            margin-left: auto;
+            font-weight: normal;
+        }
+
+        .site-settings-toggle {
+            margin-bottom: 10px;
+        }
+
+        .site-toggle-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .site-toggle-label input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+
+        .site-item {
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .site-item:last-child {
+            border-bottom: none;
+        }
+
+        .site-item .switch-label {
+            font-size: 12px;
+        }
+
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔓 解除复制粘贴限制</h1>
+        <div class="version">版本 8.0.0</div>
+    </div>
+    
+    <div class="switch-container">
+        <div class="switch-item">
+            <div>
+                <div class="switch-label">总开关</div>
+                <div class="switch-description">启用/禁用所有功能</div>
+            </div>
+            <div class="toggle-switch active" id="mainSwitch"></div>
+        </div>
+        
+        <div class="switch-item">
+            <div>
+                <div class="switch-label">解除复制限制</div>
+                <div class="switch-description">允许复制网页内容</div>
+            </div>
+            <div class="toggle-switch active" id="copySwitch"></div>
+        </div>
+        
+        <div class="switch-item">
+            <div>
+                <div class="switch-label">解除粘贴限制</div>
+                <div class="switch-description">允许粘贴到输入框</div>
+            </div>
+            <div class="toggle-switch active" id="pasteSwitch"></div>
+        </div>
+        
+        <div class="switch-item">
+            <div>
+                <div class="switch-label">模拟人工输入</div>
+                <div class="switch-description">使用 Ctrl+M 呼出输入框</div>
+            </div>
+            <div class="toggle-switch active" id="inputSwitch"></div>
+        </div>
+    </div>
+    
+    <div class="info-section">
+        <div class="info-title">
+            <span>💡</span>
+            <span>使用说明</span>
+        </div>
+        <div class="info-content">
+            • 按 <span class="shortcut">Ctrl+M</span> 呼出浮动输入框<br>
+            • 双击输入框也可呼出输入框<br>
+            • 支持学习通、PTA、CSDN、飞书等网站
+        </div>
+    </div>
+    
+    <div class="status-indicator">
+        <div class="status-dot active" id="statusDot"></div>
+        <span id="statusText">插件运行中</span>
+    </div>
+
+    <div class="site-settings-section" id="siteSettingsSection" style="display: none;">
+        <div class="site-settings-title">
+            <span>🌐</span>
+            <span>当前网站设置</span>
+            <span id="siteHostname" class="site-hostname"></span>
+        </div>
+        <div class="site-settings-toggle">
+            <label class="site-toggle-label">
+                <input type="checkbox" id="siteSpecificToggle">
+                <span>为此网站使用独立设置</span>
+            </label>
+        </div>
+        <div id="siteSpecificControls" style="display: none;">
+            <div class="switch-item site-item">
+                <div>
+                    <div class="switch-label">此网站总开关</div>
+                </div>
+                <div class="toggle-switch" id="siteMainSwitch"></div>
+            </div>
+            <div class="switch-item site-item">
+                <div>
+                    <div class="switch-label">此网站复制</div>
+                </div>
+                <div class="toggle-switch" id="siteCopySwitch"></div>
+            </div>
+            <div class="switch-item site-item">
+                <div>
+                    <div class="switch-label">此网站粘贴</div>
+                </div>
+                <div class="toggle-switch" id="sitePasteSwitch"></div>
+            </div>
+            <div class="switch-item site-item">
+                <div>
+                    <div class="switch-label">此网站输入</div>
+                </div>
+                <div class="toggle-switch" id="siteInputSwitch"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        作者：Echo | 邮箱：EchoRunning@outlook.com
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>
