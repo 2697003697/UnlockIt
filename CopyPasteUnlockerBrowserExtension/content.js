@@ -35,7 +35,7 @@
 
     // ==================== 日志系统 ====================
     const Logger = {
-        prefix: '[解除复制粘贴限制]',
+        prefix: '[UnlockIt]',
         
         log(...args) {
             if (CONFIG.DEBUG) {

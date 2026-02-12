@@ -21,7 +21,7 @@
 
     // ==================== 日志系统 ====================
     const Logger = {
-        prefix: '[UnlockPopup]',
+        prefix: '[UnlockIt]',
         log(...args) {
             if (CONFIG.DEBUG) console.log(this.prefix, ...args);
         },

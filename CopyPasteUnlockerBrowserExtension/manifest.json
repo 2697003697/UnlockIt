@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "解除复制粘贴限制",
+  "name": "UnlockIt",
   "version": "8.1.0",
-  "description": "⭐学习通⭐PTA⭐CSDN⭐飞书⭐百度文库⭐知乎⭐微信公众号⭐知网⭐破解所有网站【禁止复制】和【禁止粘贴】限制，支持【模拟人工输入】",
+  "description": "UnlockIt - 解除网页复制粘贴限制 | 支持学习通、PTA、CSDN、飞书、百度文库、知乎、微信公众号、知网等网站",
   "author": "Echo",
   "permissions": [
     "storage",
