@@ -1,12 +1,15 @@
 {
   "manifest_version": 3,
   "name": "UnlockIt",
-  "version": "8.1.0",
-  "description": "UnlockIt - 解除网页复制粘贴限制 | 支持学习通、PTA、CSDN、飞书、百度文库、知乎、微信公众号、知网等网站",
+  "version": "8.2.0",
+  "description": "UnlockIt - 解除网页复制粘贴限制 | 支持钉钉文档、学习通、PTA、CSDN、飞书、百度文库、知乎等网站",
   "author": "Echo",
   "permissions": [
     "storage",
     "activeTab",
+    "tabs",
+    "clipboardRead",
+    "clipboardWrite",
     "contextMenus",
     "scripting"
   ],
@@ -29,9 +32,17 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
+      "js": ["main-world.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_start",
-      "all_frames": true
+      "all_frames": true,
+      "world": "ISOLATED"
     }
   ],
   "background": {

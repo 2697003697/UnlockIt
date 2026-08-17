@@ -5,7 +5,7 @@
 
     // ==================== 配置 ====================
     const CONFIG = {
-        VERSION: '8.1.0',
+        VERSION: '8.2.0',
         STORAGE_KEY: 'unlockSettings',
         DEBUG: false
     };
@@ -27,6 +27,9 @@
         },
         error(...args) {
             console.error(this.prefix, ...args);
+        },
+        warn(...args) {
+            console.warn(this.prefix, ...args);
         },
         info(...args) {
             console.info(this.prefix, ...args);
@@ -83,23 +86,23 @@
             try {
                 const validated = Utils.validateSettings(settings);
                 await chrome.storage.local.set({ [CONFIG.STORAGE_KEY]: validated });
-                // 更新图标状态
                 await IconManager.update(validated.mainEnabled);
-                return true;
+                return validated;
             } catch (error) {
                 Logger.error('Failed to save settings:', error);
-                return false;
+                return null;
             }
         },
 
         async resetSettings() {
             try {
-                await chrome.storage.local.set({ [CONFIG.STORAGE_KEY]: { ...DEFAULT_SETTINGS } });
+                const settings = { ...DEFAULT_SETTINGS };
+                await chrome.storage.local.set({ [CONFIG.STORAGE_KEY]: settings });
                 await IconManager.update(false);
-                return true;
+                return settings;
             } catch (error) {
                 Logger.error('Failed to reset settings:', error);
-                return false;
+                return null;
             }
         }
     };
@@ -193,9 +196,9 @@
 
         async handleSetSettings(settings, sendResponse) {
             try {
-                const success = await Storage.saveSettings(settings);
-                if (success) {
-                    sendResponse({ success: true });
+                const savedSettings = await Storage.saveSettings(settings);
+                if (savedSettings) {
+                    sendResponse({ success: true, settings: savedSettings });
                 } else {
                     sendResponse({ success: false, error: 'Failed to save settings' });
                 }
@@ -207,9 +210,8 @@
 
         async handleResetSettings(sendResponse) {
             try {
-                const success = await Storage.resetSettings();
-                if (success) {
-                    const settings = await Storage.getSettings();
+                const settings = await Storage.resetSettings();
+                if (settings) {
                     sendResponse({ success: true, settings });
                 } else {
                     sendResponse({ success: false, error: 'Failed to reset settings' });
@@ -307,6 +309,16 @@
                 });
 
                 chrome.contextMenus.create({
+                    id: 'unlock-copy-dingtalk',
+                    title: '🔓 强制复制当前选区',
+                    contexts: ['all'],
+                    documentUrlPatterns: [
+                        '*://*.dingtalk.com/*',
+                        '*://*.alidocs.com/*'
+                    ]
+                });
+
+                chrome.contextMenus.create({
                     id: 'unlock-paste',
                     title: '🔓 强制粘贴',
                     contexts: ['editable']
@@ -335,6 +347,9 @@
                 case 'unlock-copy':
                     await this.handleCopy(info, tab);
                     break;
+                case 'unlock-copy-dingtalk':
+                    await this.handleDingTalkCopy(info, tab);
+                    break;
                 case 'unlock-paste':
                     await this.handlePaste(info, tab);
                     break;
@@ -347,59 +362,79 @@
         async handleCopy(info, tab) {
             try {
                 const settings = await Storage.getSettings();
-                if (!settings.mainEnabled) {
-                    this.showNotification(tab.id, '请先启用插件', 'warning');
+                if (!settings.mainEnabled || !settings.copyEnabled) {
+                    this.showNotification(tab.id, '复制解锁功能未启用', 'warning', info.frameId);
                     return;
                 }
 
                 const text = info.selectionText;
                 if (text) {
                     await chrome.scripting.executeScript({
-                        target: { tabId: tab.id },
-                        func: (textToCopy) => {
-                            navigator.clipboard.writeText(textToCopy).then(() => {
-                                if (typeof Toast !== 'undefined') {
-                                    Toast.show('复制成功', 'success');
-                                }
-                            });
+                        target: {
+                            tabId: tab.id,
+                            frameIds: [info.frameId ?? 0]
                         },
+                        func: async (textToCopy) => navigator.clipboard.writeText(textToCopy),
                         args: [text]
                     });
+                    this.showNotification(tab.id, '复制成功', 'success', info.frameId);
                 }
             } catch (error) {
                 Logger.error('Failed to handle copy:', error);
+                this.showNotification(tab.id, '复制失败', 'error', info.frameId);
+            }
+        },
+
+        async handleDingTalkCopy(info, tab) {
+            try {
+                const settings = await Storage.getSettings();
+                if (!settings.mainEnabled || !settings.copyEnabled) {
+                    this.showNotification(tab.id, '复制解锁功能未启用', 'warning', info.frameId);
+                    return;
+                }
+
+                const response = await chrome.tabs.sendMessage(tab.id, {
+                    type: 'getDingTalkSelection'
+                }, {
+                    frameId: info.frameId ?? 0
+                });
+
+                if (!response?.text) {
+                    this.showNotification(tab.id, '未检测到选中文本', 'warning', info.frameId);
+                    return;
+                }
+
+                await chrome.scripting.executeScript({
+                    target: {
+                        tabId: tab.id,
+                        frameIds: [info.frameId ?? 0]
+                    },
+                    func: async text => navigator.clipboard.writeText(text),
+                    args: [response.text]
+                });
+                this.showNotification(tab.id, '复制成功', 'success', info.frameId);
+            } catch (error) {
+                Logger.error('Failed to handle DingTalk copy:', error);
+                this.showNotification(tab.id, '复制失败', 'error', info.frameId);
             }
         },
 
         async handlePaste(info, tab) {
             try {
                 const settings = await Storage.getSettings();
-                if (!settings.mainEnabled) {
-                    this.showNotification(tab.id, '请先启用插件', 'warning');
+                if (!settings.mainEnabled || !settings.pasteEnabled) {
+                    this.showNotification(tab.id, '粘贴解锁功能未启用', 'warning', info.frameId);
                     return;
                 }
 
-                await chrome.scripting.executeScript({
-                    target: { tabId: tab.id },
-                    func: () => {
-                        navigator.clipboard.readText().then(text => {
-                            const activeElement = document.activeElement;
-                            if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA' || activeElement.isContentEditable)) {
-                                const start = activeElement.selectionStart || 0;
-                                const end = activeElement.selectionEnd || 0;
-                                const value = activeElement.value || '';
-                                activeElement.value = value.substring(0, start) + text + value.substring(end);
-                                activeElement.selectionStart = activeElement.selectionEnd = start + text.length;
-                                activeElement.dispatchEvent(new InputEvent('input', { bubbles: true }));
-                                if (typeof Toast !== 'undefined') {
-                                    Toast.show('粘贴成功', 'success');
-                                }
-                            }
-                        });
-                    }
+                await chrome.tabs.sendMessage(tab.id, {
+                    type: 'forcePaste'
+                }, {
+                    frameId: info.frameId ?? 0
                 });
             } catch (error) {
                 Logger.error('Failed to handle paste:', error);
+                this.showNotification(tab.id, '粘贴失败', 'error', info.frameId);
             }
         },
 
@@ -407,21 +442,22 @@
             try {
                 const settings = await Storage.getSettings();
                 settings.mainEnabled = !settings.mainEnabled;
-                await Storage.saveSettings(settings);
+                const savedSettings = await Storage.saveSettings(settings);
+                if (!savedSettings) throw new Error('Failed to save settings');
                 
-                const message = settings.mainEnabled ? '插件已启用' : '插件已禁用';
-                this.showNotification(tab.id, message, settings.mainEnabled ? 'success' : 'info');
+                const message = savedSettings.mainEnabled ? '插件已启用' : '插件已禁用';
+                this.showNotification(tab.id, message, savedSettings.mainEnabled ? 'success' : 'info', 0);
             } catch (error) {
                 Logger.error('Failed to toggle plugin:', error);
             }
         },
 
-        showNotification(tabId, message, type) {
+        showNotification(tabId, message, type, frameId = 0) {
             chrome.tabs.sendMessage(tabId, {
                 type: 'showToast',
                 message: message,
                 toastType: type
-            }).catch(() => {});
+            }, { frameId }).catch(() => {});
         }
     };
 
@@ -452,24 +488,10 @@
             try {
                 const settings = await Storage.getSettings();
                 settings.mainEnabled = !settings.mainEnabled;
-                await Storage.saveSettings(settings);
-                
-                // 通知所有标签页
-                const tabs = await chrome.tabs.query({});
-                for (const tab of tabs) {
-                    if (tab.id) {
-                        try {
-                            await chrome.tabs.sendMessage(tab.id, {
-                                type: 'settingsChanged',
-                                settings: settings
-                            });
-                        } catch (e) {
-                            // 忽略无法通信的标签页
-                        }
-                    }
-                }
-                
-                Logger.info('Plugin toggled via shortcut:', settings.mainEnabled);
+                const savedSettings = await Storage.saveSettings(settings);
+                if (!savedSettings) throw new Error('Failed to save settings');
+
+                Logger.info('Plugin toggled via shortcut:', savedSettings.mainEnabled);
             } catch (error) {
                 Logger.error('Failed to toggle plugin:', error);
             }
@@ -562,6 +584,13 @@
 
                 // 初始化图标状态
                 await IconManager.init();
+
+                // 所有设置入口最终都会写 storage，徽章只监听这一处变化。
+                chrome.storage.onChanged.addListener((changes, areaName) => {
+                    if (areaName !== 'local' || !changes[CONFIG.STORAGE_KEY]) return;
+                    const settings = Utils.validateSettings(changes[CONFIG.STORAGE_KEY].newValue);
+                    IconManager.update(settings.mainEnabled);
+                });
 
                 Logger.info('Background script initialized');
             } catch (error) {

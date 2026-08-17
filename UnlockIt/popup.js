@@ -5,7 +5,7 @@
 
     // ==================== 配置 ====================
     const CONFIG = {
-        VERSION: '8.1.0',
+        VERSION: '8.2.0',
         STORAGE_KEY: 'unlockSettings',
         DEBUG: false
     };
@@ -88,8 +88,8 @@
     const Storage = {
         async getSettings() {
             try {
-                const result = await chrome.storage.local.get(CONFIG.STORAGE_KEY);
-                return Utils.validateSettings(result[CONFIG.STORAGE_KEY]);
+                const response = await chrome.runtime.sendMessage({ type: 'getSettings' });
+                return Utils.validateSettings(response?.settings);
             } catch (error) {
                 Logger.error('Failed to get settings:', error);
                 return { ...DEFAULT_SETTINGS };
@@ -99,11 +99,14 @@
         async saveSettings(settings) {
             try {
                 const validated = Utils.validateSettings(settings);
-                await chrome.storage.local.set({ [CONFIG.STORAGE_KEY]: validated });
-                return true;
+                const response = await chrome.runtime.sendMessage({
+                    type: 'setSettings',
+                    settings: validated
+                });
+                return response?.success ? Utils.validateSettings(response.settings) : null;
             } catch (error) {
                 Logger.error('Failed to save settings:', error);
-                return false;
+                return null;
             }
         }
     };
@@ -157,45 +160,6 @@
         }
     };
 
-    // ==================== 消息通信 ====================
-    const Messaging = {
-        // 通知所有标签页设置更新
-        async notifyAllTabs(settings) {
-            try {
-                const tabs = await chrome.tabs.query({});
-                const promises = tabs.map(tab => 
-                    chrome.tabs.sendMessage(tab.id, {
-                        type: 'settingsUpdated',
-                        settings: settings
-                    }).catch(err => {
-                        Logger.log(`Failed to notify tab ${tab.id}:`, err.message);
-                        return null;
-                    })
-                );
-                await Promise.all(promises);
-            } catch (error) {
-                Logger.error('Failed to notify tabs:', error);
-            }
-        },
-
-        // 获取当前标签页设置
-        async getCurrentTabSettings() {
-            try {
-                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                if (!tab) return null;
-
-                const response = await chrome.tabs.sendMessage(tab.id, {
-                    type: 'getSettings'
-                }).catch(() => null);
-
-                return response?.settings || null;
-            } catch (error) {
-                Logger.log('Failed to get current tab settings:', error);
-                return null;
-            }
-        }
-    };
-
     // ==================== 状态管理 ====================
     const State = {
         settings: { ...DEFAULT_SETTINGS },
@@ -240,19 +204,21 @@
 
     // ==================== 事件处理 ====================
     const EventHandlers = {
-        // 保存设置并通知标签页
-        async saveAndNotify() {
+        // 设置统一交给 background 保存；content script 监听 storage 变化。
+        async saveSettings() {
             if (State.isUpdating) return;
             State.isUpdating = true;
 
             try {
-                const success = await Storage.saveSettings(State.settings);
-                if (success) {
-                    await Messaging.notifyAllTabs(State.settings);
-                    UI.update(State.settings);
+                const savedSettings = await Storage.saveSettings(State.settings);
+                if (savedSettings) {
+                    State.update(savedSettings);
+                } else {
+                    State.update(await Storage.getSettings());
                 }
+                UI.update(State.settings);
             } catch (error) {
-                Logger.error('Failed to save and notify:', error);
+                Logger.error('Failed to save settings:', error);
             } finally {
                 State.isUpdating = false;
             }
@@ -263,7 +229,7 @@
 
         // 初始化事件监听
         init() {
-            this.debouncedSave = Utils.debounce(this.saveAndNotify.bind(this), 100);
+            this.debouncedSave = Utils.debounce(this.saveSettings.bind(this), 100);
 
             const { mainSwitch, copySwitch, pasteSwitch, inputSwitch } = UI.elements;
 
