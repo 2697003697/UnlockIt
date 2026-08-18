@@ -6,6 +6,8 @@
 
     const SETTINGS_EVENT = 'unlockit:settings';
     const SELECTION_EVENT = 'unlockit:dingtalk-selection';
+    const DOCIN_SELECTION_EVENT = 'unlockit:docin-selection';
+    const DOCIN_POINTER_EVENT = 'unlockit:docin-pointer';
     const state = {
         mainEnabled: false,
         copyEnabled: true,
@@ -20,6 +22,10 @@
     let dingTalkSelectionRange = null;
     let dingTalkSelectionTimestamp = 0;
     const DINGTALK_SELECTION_TTL = 60000;
+    let docinSelectionText = '';
+    let docinSelectionTimestamp = 0;
+    let docinDragging = false;
+    const DOCIN_SELECTION_TTL = 60000;
 
     const updateState = settings => {
         if (!settings || typeof settings !== 'object') return;
@@ -34,6 +40,7 @@
         } else {
             uninstallNetworkInterceptors();
             clearDingTalkSelection();
+            clearDocinSelection();
         }
     };
 
@@ -104,7 +111,83 @@
             return activeElement.value.slice(activeElement.selectionStart, activeElement.selectionEnd);
         }
         if (!hasFreshDingTalkSelection()) clearDingTalkSelection();
-        return window.getSelection()?.toString() || dingTalkSelectionText || '';
+        if (!hasFreshDocinSelection()) clearDocinSelection();
+        if (isDocinHost() && hasFreshDocinSelection()) return docinSelectionText;
+        return window.getSelection()?.toString() || dingTalkSelectionText || docinSelectionText || '';
+    };
+
+    const publishDocinSelection = () => {
+        document.dispatchEvent(new CustomEvent(DOCIN_SELECTION_EVENT, {
+            detail: docinSelectionText
+        }));
+    };
+
+    const clearDocinSelection = () => {
+        docinSelectionText = '';
+        docinSelectionTimestamp = 0;
+        publishDocinSelection();
+    };
+
+    const hasFreshDocinSelection = () => {
+        return Boolean(docinSelectionText &&
+            Date.now() - docinSelectionTimestamp <= DOCIN_SELECTION_TTL);
+    };
+
+    const isDocinHost = () => /(^|\.)(docin|doc88)\.com$/i.test(window.location.hostname);
+
+    const isDocinSelectMode = () => {
+        const selectTool = document.querySelector('#j_select');
+        return !selectTool || selectTool.classList.contains('tool_select_active');
+    };
+
+    const isDocinViewerNode = node => {
+        if (!node || !isDocinHost()) return false;
+        const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        return Boolean(element?.closest?.('#contentcontainer'));
+    };
+
+    const fallbackCopy = text => {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none;';
+        const parent = document.body || document.documentElement;
+        if (!parent) return false;
+        parent.appendChild(textarea);
+        textarea.select();
+        let copied = false;
+        try {
+            copied = document.execCommand('copy');
+        } catch {
+            // Clipboard API may be unavailable in restricted frames.
+        }
+        textarea.remove();
+        return copied;
+    };
+
+    const copyText = text => {
+        if (!text) return;
+        try {
+            if (navigator.clipboard?.writeText) {
+                navigator.clipboard.writeText(text).catch(() => {
+                    fallbackCopy(text);
+                });
+                return;
+            }
+        } catch {
+            // Fall back to the synchronous copy command below.
+        }
+        fallbackCopy(text);
+    };
+
+    const dispatchDocinPointer = (type, event) => {
+        document.dispatchEvent(new CustomEvent(DOCIN_POINTER_EVENT, {
+            detail: JSON.stringify({
+                type,
+                x: event.clientX,
+                y: event.clientY
+            })
+        }));
     };
 
     document.addEventListener('selectionchange', () => cacheDingTalkSelection(), true);
@@ -115,9 +198,13 @@
     window.addEventListener('contextmenu', event => {
         if (!isDingTalkEditorNode(event.target)) {
             clearDingTalkSelection();
-            return;
+        } else {
+            cacheDingTalkSelection(true);
         }
-        cacheDingTalkSelection(true);
+
+        if (isDocinHost() && !isDocinViewerNode(event.target)) {
+            clearDocinSelection();
+        }
     }, true);
 
     document.addEventListener(SETTINGS_EVENT, event => {
@@ -128,6 +215,52 @@
         }
     }, true);
 
+    document.addEventListener(DOCIN_SELECTION_EVENT, event => {
+        if (typeof event.detail !== 'string') return;
+        docinSelectionText = event.detail;
+        docinSelectionTimestamp = event.detail ? Date.now() : 0;
+    }, true);
+
+    window.addEventListener('mousedown', event => {
+        if (!isDocinHost() || event.button !== 0) return;
+        if (!isDocinViewerNode(event.target)) {
+            clearDocinSelection();
+            return;
+        }
+        if (!state.mainEnabled || !state.copyEnabled || !isDocinSelectMode()) {
+            return;
+        }
+
+        docinDragging = true;
+        clearDocinSelection();
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        dispatchDocinPointer('down', event);
+    }, true);
+
+    window.addEventListener('mousemove', event => {
+        if (!docinDragging) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        dispatchDocinPointer('move', event);
+    }, true);
+
+    window.addEventListener('mouseup', event => {
+        if (!docinDragging) return;
+        docinDragging = false;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        dispatchDocinPointer('up', event);
+    }, true);
+
+    window.addEventListener('blur', () => {
+        if (!docinDragging) return;
+        docinDragging = false;
+        document.dispatchEvent(new CustomEvent(DOCIN_POINTER_EVENT, {
+            detail: JSON.stringify({ type: 'cancel' })
+        }));
+    }, true);
+
     window.addEventListener('keydown', event => {
         if (!state.mainEnabled || event.altKey || !(event.ctrlKey || event.metaKey)) return;
 
@@ -135,6 +268,12 @@
         if (key === 'c' && state.copyEnabled && getSelectedText()) {
             event.preventDefault();
             event.stopImmediatePropagation();
+            const text = getSelectedText();
+            if (isDocinHost() && hasFreshDocinSelection()) {
+                // The reader uses a synthetic selection, so execCommand only works once in some versions.
+                copyText(text);
+                return;
+            }
             if (!window.getSelection()?.toString() && dingTalkSelectionText) {
                 restoreDingTalkSelection();
             }

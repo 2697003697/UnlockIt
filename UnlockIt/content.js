@@ -7,7 +7,7 @@
     'use strict';
 
     const CONFIG = {
-        VERSION: '8.2.0',
+        VERSION: '8.2.1',
         STORAGE_KEY: 'unlockSettings',
         DEBUG: false,
         MUTATION_DELAY: 50
@@ -144,6 +144,8 @@
         targetElement: null,
         dingTalkSelectionText: '',
         dingTalkSelectionTimestamp: 0,
+        docinSelectionText: '',
+        docinSelectionTimestamp: 0,
         observers: new Set(),
         eventListeners: new Set(),
         cleanupFns: [],
@@ -277,6 +279,8 @@
             this.targetElement = null;
             this.dingTalkSelectionText = '';
             this.dingTalkSelectionTimestamp = 0;
+            this.docinSelectionText = '';
+            this.docinSelectionTimestamp = 0;
             this.featuresEnabled = false;
         }
     };
@@ -383,6 +387,17 @@
                 return { success: false, text: '' };
             }
             return { success: true, text: State.dingTalkSelectionText };
+        },
+
+        getDocinSelection() {
+            if (!PageDetector.is('docin') ||
+                !State.settings.mainEnabled ||
+                !State.settings.copyEnabled ||
+                !State.docinSelectionText ||
+                Date.now() - State.docinSelectionTimestamp > 60000) {
+                return { success: false, text: '' };
+            }
+            return { success: true, text: State.docinSelectionText };
         }
     };
 
@@ -515,6 +530,463 @@
         }
     };
 
+    const DocinSelectionEngine = {
+        initialized: false,
+        active: false,
+        startPoint: null,
+        currentPoint: null,
+        overlay: null,
+        styleElement: null,
+        resolveToken: 0,
+
+        init() {
+            if (this.initialized || !PageDetector.is('docin')) return;
+            this.initialized = true;
+            this.installStyles();
+
+            State.registerEventListener(document, 'unlockit:docin-pointer', event => {
+                if (typeof event.detail !== 'string') return;
+                try {
+                    this.handlePointer(JSON.parse(event.detail));
+                } catch (error) {
+                    Logger.warn('Invalid Docin pointer event:', error);
+                }
+            }, true);
+            State.addCleanup(() => this.reset());
+        },
+
+        installStyles() {
+            if (this.styleElement || !document.documentElement) return;
+            const style = document.createElement('style');
+            style.id = 'unlock-docin-reader-style';
+            style.textContent = `
+                #contentcontainer,
+                #contentcontainer .model.panel,
+                #contentcontainer .panel_inner,
+                #contentcontainer .PageView_content__1DxhR,
+                #contentcontainer .hkswf-content2,
+                #contentcontainer svg,
+                #contentcontainer svg text,
+                #contentcontainer svg tspan {
+                    -webkit-user-select: none !important;
+                    user-select: none !important;
+                    cursor: text !important;
+                }
+            `;
+            document.documentElement.appendChild(style);
+            this.styleElement = style;
+        },
+
+        reset() {
+            this.active = false;
+            this.startPoint = null;
+            this.currentPoint = null;
+            this.resolveToken++;
+            this.overlay?.remove();
+            this.overlay = null;
+            this.styleElement?.remove();
+            this.styleElement = null;
+            this.initialized = false;
+            this.publishSelection('');
+        },
+
+        publishSelection(text) {
+            State.docinSelectionText = text;
+            State.docinSelectionTimestamp = text ? Date.now() : 0;
+            document.dispatchEvent(new CustomEvent('unlockit:docin-selection', { detail: text }));
+        },
+
+        handlePointer(pointer) {
+            if (!State.settings.mainEnabled || !State.settings.copyEnabled) return;
+            if (pointer.type === 'down') this.start(pointer.x, pointer.y);
+            else if (pointer.type === 'move') this.move(pointer.x, pointer.y);
+            else if (pointer.type === 'up') this.finish(pointer.x, pointer.y);
+            else if (pointer.type === 'cancel') this.cancel();
+        },
+
+        start(x, y) {
+            this.resolveToken++;
+            this.active = true;
+            this.startPoint = { x, y };
+            this.currentPoint = { x, y };
+            this.overlay?.remove();
+            this.overlay = null;
+            this.publishSelection('');
+            this.renderDragBox();
+        },
+
+        move(x, y) {
+            if (!this.active) return;
+            this.currentPoint = { x, y };
+            this.renderDragBox();
+        },
+
+        finish(x, y) {
+            if (!this.active) return;
+            this.active = false;
+            this.currentPoint = { x, y };
+            this.renderDragBox();
+            const token = ++this.resolveToken;
+            requestAnimationFrame(() => this.resolveSelection(token));
+        },
+
+        cancel() {
+            this.active = false;
+            this.overlay?.remove();
+            this.overlay = null;
+        },
+
+        async resolveSelection(token) {
+            const startTime = performance.now();
+            const pages = this.getSelectedPages();
+            if (token !== this.resolveToken) return;
+            if (pages.length === 0) {
+                this.cancel();
+                Toast.show('未找到已加载的文档页面', 'warning');
+                return;
+            }
+
+            const glyphs = await this.collectSelectedGlyphs(pages, token);
+            if (token !== this.resolveToken) return;
+            if (glyphs.length === 0) {
+                this.cancel();
+                Toast.show('框选区域内没有已加载文字，请滚动到文字显示后重试', 'warning');
+                return;
+            }
+
+            const ordered = this.sortIntoReadingOrder(glyphs);
+            const startIndex = this.findNearestGlyph(ordered, this.startPoint);
+            const endIndex = this.findNearestGlyph(ordered, this.currentPoint);
+            if (startIndex < 0 || endIndex < 0) {
+                this.cancel();
+                return;
+            }
+
+            const from = Math.min(startIndex, endIndex);
+            const to = Math.max(startIndex, endIndex);
+            const selected = ordered.slice(from, to + 1);
+            const text = this.buildText(selected);
+            this.publishSelection(text);
+            this.renderHighlights(selected);
+
+            if (text) {
+                Logger.log('Docin selection resolved in', Math.round(performance.now() - startTime), 'ms');
+                Toast.show('已框选文字，按 Ctrl+C 或使用右键菜单复制', 'success', 2400);
+            }
+        },
+
+        getSelectedPages() {
+            const pages = Utils.queryAll(document, '#contentcontainer .model.panel')
+                .map((element, domIndex) => ({
+                    element,
+                    domIndex,
+                    pageIndex: Number(element.id?.match(/page_(\d+)/)?.[1] || domIndex + 1),
+                    rect: element.getBoundingClientRect()
+                }))
+                .filter(page => page.rect.width > 0 && page.rect.height > 0);
+            if (pages.length === 0) return [];
+
+            const startPage = this.findNearestPage(pages, this.startPoint);
+            const endPage = this.findNearestPage(pages, this.currentPoint);
+            if (!startPage || !endPage) return [];
+
+            const minIndex = Math.min(startPage.domIndex, endPage.domIndex);
+            const maxIndex = Math.max(startPage.domIndex, endPage.domIndex);
+            return pages.filter(page => page.domIndex >= minIndex && page.domIndex <= maxIndex);
+        },
+
+        findNearestPage(pages, point) {
+            let nearest = null;
+            let nearestDistance = Infinity;
+            pages.forEach(page => {
+                const dx = point.x < page.rect.left ? page.rect.left - point.x :
+                    point.x > page.rect.right ? point.x - page.rect.right : 0;
+                const dy = point.y < page.rect.top ? page.rect.top - point.y :
+                    point.y > page.rect.bottom ? point.y - page.rect.bottom : 0;
+                const distance = Math.hypot(dx, dy);
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearest = page;
+                }
+            });
+            return nearest;
+        },
+
+        async collectSelectedGlyphs(pages, token) {
+            const glyphs = [];
+            const firstPage = pages[0];
+            const lastPage = pages[pages.length - 1];
+            const startPage = this.findNearestPage(pages, this.startPoint);
+            const endPage = this.findNearestPage(pages, this.currentPoint);
+            const isForward = startPage.domIndex < endPage.domIndex ||
+                (startPage.domIndex === endPage.domIndex &&
+                    (this.startPoint.y < this.currentPoint.y ||
+                        (this.startPoint.y === this.currentPoint.y && this.startPoint.x <= this.currentPoint.x)));
+            const logicalStart = isForward ? this.startPoint : this.currentPoint;
+            const logicalEnd = isForward ? this.currentPoint : this.startPoint;
+
+            for (const page of pages) {
+                if (token !== this.resolveToken) return [];
+                const textElements = Utils.queryAll(page.element, '.hkswf-content2 svg text, .PageView_content__1DxhR svg text');
+                const candidates = textElements.filter(textElement => {
+                    if (!textElement.textContent) return false;
+                    const rect = textElement.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) return false;
+                    const centerY = rect.top + rect.height / 2;
+                    if (pages.length === 1) {
+                        const top = Math.min(logicalStart.y, logicalEnd.y) - rect.height;
+                        const bottom = Math.max(logicalStart.y, logicalEnd.y) + rect.height;
+                        return centerY >= top && centerY <= bottom;
+                    }
+                    if (page === firstPage) return centerY >= logicalStart.y - rect.height;
+                    if (page === lastPage) return centerY <= logicalEnd.y + rect.height;
+                    return true;
+                });
+
+                for (let index = 0; index < candidates.length; index++) {
+                    glyphs.push(...this.extractGlyphs(candidates[index], page.pageIndex));
+                    if (index > 0 && index % 40 === 0) {
+                        await new Promise(resolve => requestAnimationFrame(resolve));
+                        if (token !== this.resolveToken) return [];
+                    }
+                }
+            }
+            return glyphs;
+        },
+
+        extractGlyphs(textElement, pageIndex) {
+            const matrix = textElement.getScreenCTM?.();
+            const characters = Array.from(textElement.textContent || '');
+            if (!matrix || characters.length === 0) return [];
+
+            const positionedGlyphs = this.extractPositionedGlyphs(textElement, pageIndex, characters, matrix);
+            if (positionedGlyphs) return positionedGlyphs;
+
+            let count;
+            try {
+                count = Math.min(textElement.getNumberOfChars(), characters.length);
+            } catch {
+                return [];
+            }
+
+            const glyphs = [];
+            for (let index = 0; index < count; index++) {
+                try {
+                    const extent = textElement.getExtentOfChar(index);
+                    const rect = this.transformExtent(extent, matrix);
+                    if (rect.width <= 0 || rect.height <= 0) continue;
+                    glyphs.push({
+                        char: characters[index],
+                        pageIndex,
+                        rect,
+                        centerX: rect.left + rect.width / 2,
+                        centerY: rect.top + rect.height / 2
+                    });
+                } catch {
+                    // Some SVG engines omit geometry for hidden or malformed glyphs.
+                }
+            }
+            return glyphs;
+        },
+
+        extractPositionedGlyphs(textElement, pageIndex, characters, matrix) {
+            const xList = textElement.x?.baseVal;
+            const yList = textElement.y?.baseVal;
+            if (!xList || xList.numberOfItems < characters.length || !yList || yList.numberOfItems === 0) {
+                return null;
+            }
+
+            const fontSize = Number.parseFloat(textElement.getAttribute('font-size')) || 12;
+            const glyphs = [];
+            for (let index = 0; index < characters.length; index++) {
+                const x = xList.getItem(index).value;
+                const y = yList.getItem(Math.min(index, yList.numberOfItems - 1)).value;
+                const nextX = index + 1 < xList.numberOfItems ? xList.getItem(index + 1).value : NaN;
+                const width = Number.isFinite(nextX) && nextX > x ? nextX - x : fontSize * 0.65;
+                const rect = this.transformExtent({
+                    x,
+                    y: y - fontSize * 0.9,
+                    width,
+                    height: fontSize * 1.2
+                }, matrix);
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                glyphs.push({
+                    char: characters[index],
+                    pageIndex,
+                    rect,
+                    centerX: rect.left + rect.width / 2,
+                    centerY: rect.top + rect.height / 2
+                });
+            }
+            return glyphs;
+        },
+
+        transformExtent(extent, matrix) {
+            const points = [
+                new DOMPoint(extent.x, extent.y).matrixTransform(matrix),
+                new DOMPoint(extent.x + extent.width, extent.y).matrixTransform(matrix),
+                new DOMPoint(extent.x, extent.y + extent.height).matrixTransform(matrix),
+                new DOMPoint(extent.x + extent.width, extent.y + extent.height).matrixTransform(matrix)
+            ];
+            const xs = points.map(point => point.x);
+            const ys = points.map(point => point.y);
+            const left = Math.min(...xs);
+            const right = Math.max(...xs);
+            const top = Math.min(...ys);
+            const bottom = Math.max(...ys);
+            return { left, right, top, bottom, width: right - left, height: bottom - top };
+        },
+
+        sortIntoReadingOrder(glyphs) {
+            const pages = new Map();
+            glyphs.forEach(glyph => {
+                if (!pages.has(glyph.pageIndex)) pages.set(glyph.pageIndex, []);
+                pages.get(glyph.pageIndex).push(glyph);
+            });
+
+            const ordered = [];
+            Array.from(pages.keys()).sort((a, b) => a - b).forEach(pageIndex => {
+                const pageGlyphs = pages.get(pageIndex).sort((a, b) => a.centerY - b.centerY);
+                const lines = [];
+                pageGlyphs.forEach(glyph => {
+                    let line = lines.find(candidate => {
+                        const tolerance = Math.max(2, Math.min(candidate.height, glyph.rect.height) * 0.55);
+                        return Math.abs(candidate.centerY - glyph.centerY) <= tolerance;
+                    });
+                    if (!line) {
+                        line = { centerY: glyph.centerY, height: glyph.rect.height, glyphs: [] };
+                        lines.push(line);
+                    }
+                    line.glyphs.push(glyph);
+                    line.centerY = line.glyphs.reduce((sum, item) => sum + item.centerY, 0) / line.glyphs.length;
+                    line.height = Math.max(line.height, glyph.rect.height);
+                });
+
+                lines.sort((a, b) => a.centerY - b.centerY).forEach((line, lineIndex) => {
+                    line.glyphs.sort((a, b) => a.centerX - b.centerX).forEach(glyph => {
+                        glyph.lineIndex = lineIndex;
+                        ordered.push(glyph);
+                    });
+                });
+            });
+            return ordered;
+        },
+
+        findNearestGlyph(glyphs, point) {
+            let nearestIndex = -1;
+            let nearestDistance = Infinity;
+            glyphs.forEach((glyph, index) => {
+                const dx = point.x < glyph.rect.left ? glyph.rect.left - point.x :
+                    point.x > glyph.rect.right ? point.x - glyph.rect.right : 0;
+                const dy = point.y < glyph.rect.top ? glyph.rect.top - point.y :
+                    point.y > glyph.rect.bottom ? point.y - glyph.rect.bottom : 0;
+                const distance = Math.hypot(dx, dy);
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestIndex = index;
+                }
+            });
+            return nearestIndex;
+        },
+
+        buildText(glyphs) {
+            const lines = [];
+            let currentLine = null;
+            glyphs.forEach(glyph => {
+                const key = `${glyph.pageIndex}:${glyph.lineIndex}`;
+                if (!currentLine || currentLine.key !== key) {
+                    currentLine = { key, pageIndex: glyph.pageIndex, chars: [] };
+                    lines.push(currentLine);
+                }
+                currentLine.chars.push(glyph.char);
+            });
+            return lines.map((line, index) => {
+                const previous = lines[index - 1];
+                return `${previous && previous.pageIndex !== line.pageIndex ? '\n' : ''}${line.chars.join('')}`;
+            }).join('\n');
+        },
+
+        createOverlay(reset = false) {
+            if (reset) {
+                this.overlay?.remove();
+                this.overlay = null;
+            }
+            if (this.overlay?.isConnected) return this.overlay;
+            if (!document.body) return null;
+            const overlay = document.createElement('div');
+            overlay.id = 'unlock-docin-selection-overlay';
+            overlay.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483646;';
+            document.body.appendChild(overlay);
+            this.overlay = overlay;
+            return overlay;
+        },
+
+        renderDragBox() {
+            if (!this.startPoint || !this.currentPoint) return;
+            const overlay = this.createOverlay();
+            if (!overlay) return;
+            let box = overlay.querySelector('[data-unlock-docin-drag-box]');
+            if (!box) {
+                box = document.createElement('span');
+                box.setAttribute('data-unlock-docin-drag-box', 'true');
+                overlay.appendChild(box);
+            }
+            const left = Math.min(this.startPoint.x, this.currentPoint.x);
+            const top = Math.min(this.startPoint.y, this.currentPoint.y);
+            const width = Math.abs(this.currentPoint.x - this.startPoint.x);
+            const height = Math.abs(this.currentPoint.y - this.startPoint.y);
+            box.style.cssText = [
+                'position:absolute',
+                `left:${left + window.scrollX}px`,
+                `top:${top + window.scrollY}px`,
+                `width:${Math.max(1, width)}px`,
+                `height:${Math.max(1, height)}px`,
+                'background:rgba(37,99,235,.10)',
+                'border:1px solid rgba(37,99,235,.55)',
+                'box-sizing:border-box'
+            ].join(';');
+        },
+
+        renderHighlights(glyphs) {
+            const overlay = this.createOverlay(true);
+            if (!overlay) return;
+            const segments = [];
+            glyphs.forEach(glyph => {
+                const previous = segments[segments.length - 1];
+                const sameLine = previous && previous.pageIndex === glyph.pageIndex && previous.lineIndex === glyph.lineIndex;
+                const gap = previous ? glyph.rect.left - previous.right : Infinity;
+                if (sameLine && gap <= Math.max(12, glyph.rect.height * 1.5)) {
+                    previous.right = Math.max(previous.right, glyph.rect.right);
+                    previous.top = Math.min(previous.top, glyph.rect.top);
+                    previous.bottom = Math.max(previous.bottom, glyph.rect.bottom);
+                } else {
+                    segments.push({
+                        pageIndex: glyph.pageIndex,
+                        lineIndex: glyph.lineIndex,
+                        left: glyph.rect.left,
+                        right: glyph.rect.right,
+                        top: glyph.rect.top,
+                        bottom: glyph.rect.bottom
+                    });
+                }
+            });
+
+            segments.forEach(segment => {
+                const highlight = document.createElement('span');
+                highlight.style.cssText = [
+                    'position:absolute',
+                    `left:${segment.left + window.scrollX}px`,
+                    `top:${segment.top + window.scrollY}px`,
+                    `width:${Math.max(1, segment.right - segment.left)}px`,
+                    `height:${Math.max(1, segment.bottom - segment.top)}px`,
+                    'background:rgba(37,99,235,.28)',
+                    'border-radius:2px'
+                ].join(';');
+                overlay.appendChild(highlight);
+            });
+        }
+    };
+
     const SiteHandlers = {
         siteType: 'generic',
 
@@ -594,15 +1066,10 @@
 
         docin(root) {
             if (!State.settings.copyEnabled) return;
+            DocinSelectionEngine.init();
             this.hide(
                 '.docin-mask, .docin-login-mask, .docin-vip-mask, .docin-overlay, [class*="docin-mask"], [class*="docin-login"], [class*="docin-vip"], .login-popup, .vip-popup',
                 null,
-                root
-            );
-            this.style(
-                '.docin-content, .docin-page, .docin-viewer, .doc-content, .page-content, canvas',
-                { 'user-select': 'text', '-webkit-user-select': 'text' },
-                'important',
                 root
             );
         },
@@ -681,29 +1148,37 @@
 
     const DynamicDOMHandler = {
         init() {
+            const isDocin = PageDetector.is('docin');
             const run = Utils.throttle(mutations => {
                 mutations.forEach(mutation => {
                     mutation.addedNodes.forEach(node => {
                         if (node.nodeType !== Node.ELEMENT_NODE) return;
+                        if (isDocin) {
+                            SiteHandlers.docin(node);
+                            return;
+                        }
                         DOMUnlocker.unlockTree(node);
                         DOMUnlocker.hideGenericMasks(node);
                         SiteHandlers.apply(node);
                     });
-                    if (mutation.type === 'attributes') {
+                    if (!isDocin && mutation.type === 'attributes') {
                         DOMUnlocker.unlockElement(mutation.target);
                         SiteHandlers.apply(mutation.target.parentElement || document);
                     }
                 });
-                ShadowDOMHandler.process(document);
+                if (!isDocin) ShadowDOMHandler.process(document);
             }, CONFIG.MUTATION_DELAY);
 
             const observer = new MutationObserver(run);
-            observer.observe(document.documentElement, {
+            const observerConfig = {
                 childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: ['style', 'class']
-            });
+                subtree: true
+            };
+            if (!isDocin) {
+                observerConfig.attributes = true;
+                observerConfig.attributeFilter = ['style', 'class'];
+            }
+            observer.observe(document.documentElement, observerConfig);
             State.registerObserver(observer);
         }
     };
@@ -869,6 +1344,13 @@
                 }
             }, true);
 
+            document.addEventListener('unlockit:docin-selection', event => {
+                if (typeof event.detail === 'string') {
+                    State.docinSelectionText = event.detail;
+                    State.docinSelectionTimestamp = event.detail ? Date.now() : 0;
+                }
+            }, true);
+
             chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 Promise.resolve(this.handle(message))
                     .then(sendResponse)
@@ -895,6 +1377,8 @@
                     return ClipboardActions.forcePaste();
                 case 'getDingTalkSelection':
                     return ClipboardActions.getDingTalkSelection();
+                case 'getDocinSelection':
+                    return ClipboardActions.getDocinSelection();
                 case 'getSettings':
                     return { success: true, settings: State.settings };
                 case 'showToast':
@@ -957,7 +1441,8 @@
             if (State.featuresEnabled || !State.settings.mainEnabled) return;
             State.featuresEnabled = true;
 
-            if (State.settings.copyEnabled) {
+            const isDocin = PageDetector.is('docin');
+            if (State.settings.copyEnabled && !isDocin) {
                 DOMUnlocker.unlockTree(document);
                 DOMUnlocker.hideGenericMasks(document);
                 ShadowDOMHandler.init();

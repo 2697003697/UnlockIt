@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "UnlockIt",
-  "version": "8.2.0",
+  "version": "8.2.1",
   "description": "UnlockIt - 解除网页复制粘贴限制 | 支持钉钉文档、学习通、PTA、CSDN、飞书、百度文库、知乎等网站",
   "author": "Echo",
   "permissions": [

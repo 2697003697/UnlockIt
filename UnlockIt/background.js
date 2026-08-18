@@ -5,7 +5,7 @@
 
     // ==================== 配置 ====================
     const CONFIG = {
-        VERSION: '8.2.0',
+        VERSION: '8.2.1',
         STORAGE_KEY: 'unlockSettings',
         DEBUG: false
     };
@@ -319,6 +319,18 @@
                 });
 
                 chrome.contextMenus.create({
+                    id: 'unlock-copy-docin',
+                    title: '🔓 强制复制框选内容',
+                    contexts: ['all'],
+                    documentUrlPatterns: [
+                        '*://docin.com/*',
+                        '*://*.docin.com/*',
+                        '*://doc88.com/*',
+                        '*://*.doc88.com/*'
+                    ]
+                });
+
+                chrome.contextMenus.create({
                     id: 'unlock-paste',
                     title: '🔓 强制粘贴',
                     contexts: ['editable']
@@ -349,6 +361,9 @@
                     break;
                 case 'unlock-copy-dingtalk':
                     await this.handleDingTalkCopy(info, tab);
+                    break;
+                case 'unlock-copy-docin':
+                    await this.handleDocinCopy(info, tab);
                     break;
                 case 'unlock-paste':
                     await this.handlePaste(info, tab);
@@ -415,6 +430,40 @@
                 this.showNotification(tab.id, '复制成功', 'success', info.frameId);
             } catch (error) {
                 Logger.error('Failed to handle DingTalk copy:', error);
+                this.showNotification(tab.id, '复制失败', 'error', info.frameId);
+            }
+        },
+
+        async handleDocinCopy(info, tab) {
+            try {
+                const settings = await Storage.getSettings();
+                if (!settings.mainEnabled || !settings.copyEnabled) {
+                    this.showNotification(tab.id, '复制解锁功能未启用', 'warning', info.frameId);
+                    return;
+                }
+
+                const response = await chrome.tabs.sendMessage(tab.id, {
+                    type: 'getDocinSelection'
+                }, {
+                    frameId: info.frameId ?? 0
+                });
+
+                if (!response?.text) {
+                    this.showNotification(tab.id, '请先在文档中拖动框选文字', 'warning', info.frameId);
+                    return;
+                }
+
+                await chrome.scripting.executeScript({
+                    target: {
+                        tabId: tab.id,
+                        frameIds: [info.frameId ?? 0]
+                    },
+                    func: async text => navigator.clipboard.writeText(text),
+                    args: [response.text]
+                });
+                this.showNotification(tab.id, '复制成功', 'success', info.frameId);
+            } catch (error) {
+                Logger.error('Failed to handle Docin copy:', error);
                 this.showNotification(tab.id, '复制失败', 'error', info.frameId);
             }
         },
